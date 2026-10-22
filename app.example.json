@@ -1,0 +1,7 @@
+{
+  "name": "com.url_file_sorter",
+  "description": "URL File Sorter Native Host",
+  "path": "",
+  "type": "stdio",
+  "allowed_origins": []
+}
