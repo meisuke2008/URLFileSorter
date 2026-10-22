@@ -1,2 +1,3 @@
 # URLFileSorter
-URLと授業名でダウンロードを仕分けるChrome拡張機能とWindows補助アプリ — MUYA
+URLでファイルを仕分けるChrome拡張機能の補助アプリ
+ダウンロードファイルの外に移動させることができます
