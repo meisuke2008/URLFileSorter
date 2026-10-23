@@ -1,4 +1,5 @@
 import json
+import errno
 import os
 import shutil
 import struct
@@ -9,6 +10,31 @@ from pathlib import Path
 
 MAX_MESSAGE_BYTES = 64 * 1024
 MAX_PATH_LENGTH = 8192
+HOST_VERSION = "1.0.1"
+# About 15 seconds in total. Only Windows sharing/lock violations are retried.
+LOCK_RETRY_DELAYS = (0.25, 0.5, 1, 1.5, 2, 2, 2, 2, 2, 2)
+
+
+class IncompleteMoveError(Exception):
+    def __init__(self, message, code, copied_path, copy_complete):
+        super().__init__(message)
+        self.code = code
+        self.copied_path = str(copied_path)
+        self.copy_complete = copy_complete
+
+
+def retry_locked(operation):
+    for delay in (*LOCK_RETRY_DELAYS, None):
+        try:
+            return operation()
+        except OSError as error:
+            if getattr(error, "winerror", None) not in (32, 33) or delay is None:
+                raise
+            time.sleep(delay)
+
+
+def is_cross_device(error):
+    return getattr(error, "winerror", None) == 17 or error.errno == errno.EXDEV
 
 
 def read_message():
@@ -81,27 +107,74 @@ def move_file(source_path, destination_folder):
         raise ValueError(f"移動元がファイルではありません: {source}")
 
     folder.mkdir(parents=True, exist_ok=True)
+    if source.parent.resolve() == folder.resolve():
+        return str(source)
 
-    destination = create_unique_path(folder / source.name)
-    # Chrome or a PDF viewer may briefly keep a completed download open on
-    # Windows. Retry only sharing/lock violations; never mask other failures.
-    for delay in (0.15, 0.25, 0.4, 0.6, 0.8, None):
-        try:
-            shutil.move(str(source), str(destination))
-            break
-        except PermissionError as error:
-            if getattr(error, "winerror", None) not in (32, 33):
-                raise
-            # A cross-volume copy may have left a partial destination. Do not
-            # overwrite it or silently create a duplicate on the next attempt.
+    # shutil.move catches a failed rename (including WinError 32), copies the
+    # file and then unlinks the source. That can leave TWO files even on C:.
+    # A locked rename must NEVER turn into a copy. Copy only on EXDEV/Win17.
+    for _ in range(1000):
+        destination = create_unique_path(folder / source.name)
+
+        def rename():
+            # Windows os.rename refuses to overwrite an existing file. The
+            # existence check also handles ordinary collisions in Linux tests.
             if destination.exists():
-                raise
-            if delay is None:
-                raise PermissionError(
-                    f"ファイルを使用中のため移動できません。PDFビューアーなどで閉じてから再試行してください: {source}"
-                ) from error
-            time.sleep(delay)
+                raise FileExistsError(str(destination))
+            os.rename(str(source), str(destination))
 
+        try:
+            retry_locked(rename)
+            return str(destination)
+        except FileExistsError:
+            continue
+        except OSError as error:
+            if is_cross_device(error):
+                return copy_across_devices(source, folder)
+            if getattr(error, "winerror", None) in (32, 33):
+                raise PermissionError(
+                    "ファイルが使用中のため移動できませんでした。ロック解除を約15秒待ちましたが、"
+                    "元ファイルは残しています。アプリのプレビュー等を閉じて確認してください。"
+                ) from error
+            raise
+    raise RuntimeError("空いている移動先ファイル名を確保できませんでした")
+
+
+def copy_across_devices(source, folder):
+    # Opening the source may itself be locked. Do not reserve a destination
+    # until the source is readable. 'xb' prevents overwriting someone else's file.
+    with retry_locked(lambda: source.open("rb")) as input_file:
+        for _ in range(1000):
+            destination = create_unique_path(folder / source.name)
+            try:
+                output_file = destination.open("xb")
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise RuntimeError("空いている移動先ファイル名を確保できませんでした")
+        try:
+            with output_file:
+                shutil.copyfileobj(input_file, output_file, length=1024 * 1024)
+                output_file.flush()
+                os.fsync(output_file.fileno())
+            shutil.copystat(str(source), str(destination))
+        except Exception as error:
+            # Preserve the source and expose the incomplete copy. Never retry
+            # by creating more destination copies or silently delete user data.
+            raise IncompleteMoveError(
+                "別ドライブへのコピーを完了できませんでした。元ファイルを残しています。"
+                "移動先には途中のコピーが残っている可能性があります。",
+                "COPY_INCOMPLETE", destination, False
+            ) from error
+    try:
+        retry_locked(lambda: source.unlink())
+    except OSError as error:
+        raise IncompleteMoveError(
+            "別ドライブへのコピーは完了しましたが、元ファイルを削除できないため移動は未完了です。"
+            "元とコピーの両方を残しています。ロックが続く場合は使用中のアプリを確認してください。",
+            "SOURCE_DELETE_FAILED", destination, True
+        ) from error
     return str(destination)
 
 
@@ -120,6 +193,7 @@ def handle_message(message):
     if action == "connection_test":
         return {
             "success": True,
+            "hostVersion": HOST_VERSION,
             "message": "Pythonとの通信に成功しました"
         }
 
@@ -160,6 +234,9 @@ def main():
             return
         try:
             response = handle_message(message)
+        except IncompleteMoveError as error:
+            response = {"success": False, "error": str(error), "code": error.code,
+                        "copiedPath": error.copied_path, "copyComplete": error.copy_complete}
         except Exception as error:
             response = {"success": False, "error": str(error)}
         send_message(response)
