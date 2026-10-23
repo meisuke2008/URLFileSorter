@@ -1,5 +1,5 @@
 #define MyAppName "URL File Sorter"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "MUYA"
 #define MyAppExeName "app.exe"
 #define NativeHostName "com.url_file_sorter"
@@ -11,7 +11,7 @@ AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL=https://github.com/meisuke2008/URLFileSorter
 AppSupportURL=https://github.com/meisuke2008/URLFileSorter/issues
-VersionInfoVersion=1.0.0.0
+VersionInfoVersion=1.0.1.0
 DefaultDirName={localappdata}\URLFileSorter
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
